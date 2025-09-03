@@ -1,0 +1,8 @@
+Pillow
+numpy
+scikit-image
+scipy
+opencv-python
+google-generativeai
+python-dotenv
+cairosvg
