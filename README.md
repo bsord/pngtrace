@@ -1,74 +1,69 @@
 # pngtrace
 
-Lightweight pipeline to turn a raster image into centerline SVG paths, optionally with an AI pre-processing step to produce clean black/white line art before vectorization.
+Streamlit‑first tool to turn a raster image into clean black/white vector output (centerline strokes or filled regions) with an optional Gemini AI pre‑processing step that normalizes contrast before tracing.
 
-## Features
-- Classical centerline tracer (`pngtrace.py`) using skeletonization + smoothing + corner preservation.
-- Advanced experimental version (`pngtrace_v2.py`) with adaptive thresholding, sub‑pixel refinement, spline smoothing, curvature‑aware simplification.
-- AI pipeline (`pipeline.py`) that:
-  1. Loads an input raster from `inputs/` (or any path).
-  2. Calls a Gemini model to produce a high‑contrast stroke image.
-  3. Falls back gracefully to the original if AI output is absent.
-  4. Runs the classical tracer to produce an SVG.
-  5. In `--debug` mode writes a composite triptych PNG (original | AI result | final SVG raster).
-- Per‑run timestamped output directories under `outputs/` capturing all artifacts.
-- Environment variable loading via `.env` (place your `GOOGLE_API_KEY` there).
+## Key Features
+* Streamlit UI (primary workflow) – upload or pick an image, run AI enhancement, then vectorize.
+* Two vector modes:
+  * Centerline: skeleton + smoothing + simplification → stroke paths.
+  * Fill: extracts solid regions + holes → single even‑odd filled path (great for engrave / cut fills).
+* Gemini AI step (required in the UI flow) produces a high‑contrast black/white version; falls back to original if no image is returned.
+* Pure‑Python tracing core (no system binaries). Optional extras: OpenCV (better contour hierarchy), CairoSVG (nicer SVG preview) – both degrade gracefully if missing.
+* Per‑run artifact folder under `outputs/` (original, AI raster, SVG, optional debug composite).
 
-## Quick Start
+## Get an API Key
+Obtain a Google Gemini API key here: https://aistudio.google.com/apikey
+
+Set it in a `.env` file as:
+```
+GEMINI_API_KEY=your_key_here
+```
+
+## Quick Start (Streamlit)
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# Set up API key
-cp .env.example .env  # create and edit with your key (you create .env.example)
-```
-Add to `.env`:
-```
-GOOGLE_API_KEY=your_key_here
+echo "GEMINI_API_KEY=YOUR_KEY" > .env
+streamlit run streamlit_app.py
 ```
 
-### Basic centerline trace (no AI)
+### Using the App
+1. Select or upload an image (placed in `inputs/`).
+2. (Auto‑required) Run the AI step – you can tweak the prompt.
+3. Choose Mode: centerline or fill.
+4. Adjust simplification / stroke width (stroke width disabled in fill mode).
+5. Run vectorization → preview + download SVG.
+6. Re‑run AI or vector steps independently; previous results persist in session state.
+
+## Optional CLI Usage
+Plain centerline trace (bypasses AI):
 ```bash
 python pngtrace.py inputs/your_image.png output.svg --stroke-width 0.2mm --rdp 0.8
 ```
 
-### Run AI-assisted pipeline
+Full AI → trace pipeline (creates timestamped run dir under `outputs/`):
 ```bash
 python pipeline.py inputs/your_image.png output.svg --debug
 ```
-The `--debug` flag adds verbose model info and a `debug_triptych.png` composite.
-
-### Launch Streamlit UI
-```bash
-streamlit run streamlit_app.py
-```
-Then open the shown local URL. You can:
-- Pick an image from `inputs/` or upload one.
-- (Optionally) enable AI enhancement (requires `GEMINI_API_KEY`).
-- Adjust tracing parameters and run to view & download the SVG.
+`--debug` also emits `debug_triptych.png` (original | AI | final SVG raster).
 
 ## Outputs
-Each pipeline run creates: `outputs/YYYYMMDD-HHMMSS-RANDOM/` containing:
-- `original.<ext>` – original input copy
-- `ai_result.png` – AI produced raster (if available)
-- `<your_output>.svg` – final centerline SVG
-- `debug_triptych.png` – (debug only) side-by-side visualization
+`outputs/<timestamp>/` contains:
+* `original.<ext>` – input copy
+* `ai_result.png` – Gemini output (if any)
+* `<name>.svg` – final vector (centerline strokes or even‑odd filled path)
+* `debug_triptych.png` – only when `--debug` (CLI) is used
 
-## Configuration Notes
-- Stroke width is stored as provided (supports units like `px`, `mm`, `in`).
-- If you need a white background rectangle in the SVG (for viewing only), use `--background #ffffff`; by default no filled rectangle is added to avoid CAM engraving fills.
-- `pngtrace_v2.py` is optional and not yet wired into the AI pipeline—use directly while experimenting.
+## Tips & Troubleshooting
+* Missing AI image: ensure `GEMINI_API_KEY` is set and valid.
+* Too many short segments: lower `--rdp` or UI simplification slider (value closer to 0).
+* Over‑simplified / jagged: raise `--rdp`.
+* Preview missing (SVG rasterization): install `cairosvg` or rely on fallback sampler.
+* Fill mode uses even‑odd rule; small speckles can be pruned by pre‑cleaning your raster (e.g. blur + threshold) before upload.
 
-## Troubleshooting
-- CairoSVG raster preview errors: if Cairo not available the app falls back to a minimal path-only raster (curves flattened via sampling).
-- Empty AI panel: ensure `GOOGLE_API_KEY` is set and network access works; pipeline falls back to original if AI image not returned.
-- Too many small segments: decrease `--rdp` (e.g. 0.5). Too much simplification: increase it (e.g. 1.2).
-
-## Roadmap / Ideas
-- Integrate v2 pipeline into AI stage.
-- Post-processing to auto-detect and hollow large filled shapes.
-- CLI argument to override the AI prompt.
-- Export metadata JSON (model, path count, timings).
+## Experimental
+`pngtrace_v2.py` contains a more aggressive adaptive pipeline; not yet integrated into the main UI.
 
 ## License
-MIT (add a `LICENSE` file if desired).
+MIT
