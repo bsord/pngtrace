@@ -46,13 +46,16 @@ MODEL_CANDIDATES = [
     "gemini-2.5-flash-image-preview"
 ]
 PROMPT = (
-    "I need a centerline trace of this, in black and white, so it can later be easily be converted to an svg." 
+    "I need a centerline trace of this, so it can later be easily be converted to an svg. Only black and white may be used with an even-odd loop so svg tracing is easier"  # default AI prompt
 )
 
 
-def call_gemini(image_path: str, debug: bool = False):
+def call_gemini(image_path: str, debug: bool = False, custom_prompt: Optional[str] = None):
     """Call Gemini; return list of image bytes (PNG/JPEG).
-    Uses plain list syntax: [text, image_dict].
+    Args:
+        image_path: Input raster path.
+        debug: Verbose logging flag.
+        custom_prompt: Optional override prompt (falls back to PROMPT constant).
     """
     if not os.environ.get("GEMINI_API_KEY"):
         raise SystemExit("GEMINI_API_KEY environment variable not set (or .env missing)")
@@ -70,8 +73,9 @@ def call_gemini(image_path: str, debug: bool = False):
             if debug:
                 print(f"[DEBUG] Trying model: {model_name}")
             model = genai.GenerativeModel(model_name)
+            prompt_text = custom_prompt if custom_prompt else PROMPT
             response = model.generate_content([
-                PROMPT,
+                prompt_text,
                 {"mime_type": "image/png", "data": image_bytes}
             ])
             if debug:

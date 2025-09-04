@@ -38,6 +38,15 @@ python pipeline.py inputs/your_image.png output.svg --debug
 ```
 The `--debug` flag adds verbose model info and a `debug_triptych.png` composite.
 
+### Launch Streamlit UI
+```bash
+streamlit run streamlit_app.py
+```
+Then open the shown local URL. You can:
+- Pick an image from `inputs/` or upload one.
+- (Optionally) enable AI enhancement (requires `GEMINI_API_KEY`).
+- Adjust tracing parameters and run to view & download the SVG.
+
 ## Outputs
 Each pipeline run creates: `outputs/YYYYMMDD-HHMMSS-RANDOM/` containing:
 - `original.<ext>` – original input copy
@@ -51,7 +60,7 @@ Each pipeline run creates: `outputs/YYYYMMDD-HHMMSS-RANDOM/` containing:
 - `pngtrace_v2.py` is optional and not yet wired into the AI pipeline—use directly while experimenting.
 
 ## Troubleshooting
-- Black third panel in triptych: install Cairo system libs (`sudo apt-get install -y libcairo2 libcairo2-dev`) so CairoSVG can render accurately.
+- CairoSVG raster preview errors: if Cairo not available the app falls back to a minimal path-only raster (curves flattened via sampling).
 - Empty AI panel: ensure `GOOGLE_API_KEY` is set and network access works; pipeline falls back to original if AI image not returned.
 - Too many small segments: decrease `--rdp` (e.g. 0.5). Too much simplification: increase it (e.g. 1.2).
 
