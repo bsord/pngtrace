@@ -192,7 +192,7 @@ if st.session_state.original_path is None:
 # ---- Column 2: AI Enhancement ----
 with col2:
     st.markdown("### 2. AI Enhance")
-    default_prompt = ("I need a centerline trace of this, so it can later be easily be converted to an svg. Only black and white may be used with an even-odd loop so svg tracing is easier")
+    default_prompt = ("I need a centerline trace of this, so it can later be easily be converted to an svg. Only black and white may be used with an even-odd loop so svg tracing is easier. fills may be used if rerpesenting a black or white area from input image.")
     if 'ai_prompt' not in st.session_state or st.session_state.ai_prompt is None:
         st.session_state.ai_prompt = default_prompt
     st.session_state.ai_prompt = st.text_area("Prompt", value=st.session_state.ai_prompt, height=140, help="Edit prompt then re-run AI.")
@@ -241,7 +241,8 @@ with col2:
 # ---- Column 3: Vectorization ----
 with col3:
     st.markdown("### 3. Vectorize")
-    stroke_width = st.text_input("Stroke width", value="1mm")
+    mode = st.radio("Mode", ["centerline","fill"], horizontal=True, key="mode_radio")
+    stroke_width = st.text_input("Stroke width", value="1mm", disabled=(mode=="fill"), help="Ignored in fill mode")
     rdp = st.number_input("RDP epsilon", value=0.8, step=0.1)
     thresh_bias = st.number_input("Threshold bias", value=0.2, step=0.05)
     upscale = st.number_input("Upscale", value=4, step=1, min_value=1)
@@ -260,7 +261,7 @@ with col3:
         st.session_state.path_count = None
     if run_vec and st.session_state.ai_path:
         src_for_trace = st.session_state.ai_path  # enforced AI path
-        prev = (v1.INPUT_FILE, v1.OUTPUT_FILE, v1.STROKE_WIDTH, v1.RDP_EPS, v1.THRESH_BIAS, v1.UPSCALE, v1.CORNER_ANGLE, v1.SMOOTH_WIN, v1.SMOOTH_ORDER)
+        prev = (v1.INPUT_FILE, v1.OUTPUT_FILE, v1.STROKE_WIDTH, v1.RDP_EPS, v1.THRESH_BIAS, v1.UPSCALE, v1.CORNER_ANGLE, v1.SMOOTH_WIN, v1.SMOOTH_ORDER, getattr(v1,'MODE','centerline'))
         work_dir = Path(st.session_state.workspace_dir.name)
         out_svg_path = work_dir/'output.svg'
         t0=time.time()
@@ -274,17 +275,31 @@ with col3:
             v1.CORNER_ANGLE = corner_angle
             v1.SMOOTH_WIN = smooth_win
             v1.SMOOTH_ORDER = smooth_order
+            try:
+                v1.MODE = mode
+            except Exception:
+                pass
             v1.main()
         except Exception as e:
             st.error(f"Vectorization failed: {e}")
         finally:
             (v1.INPUT_FILE, v1.OUTPUT_FILE, v1.STROKE_WIDTH, v1.RDP_EPS, v1.THRESH_BIAS,
-             v1.UPSCALE, v1.CORNER_ANGLE, v1.SMOOTH_WIN, v1.SMOOTH_ORDER) = prev
+             v1.UPSCALE, v1.CORNER_ANGLE, v1.SMOOTH_WIN, v1.SMOOTH_ORDER, _prev_mode) = prev
+            try:
+                v1.MODE = _prev_mode
+            except Exception:
+                pass
         if out_svg_path.exists():
             st.session_state.svg_text = out_svg_path.read_text()
             st.session_state.vector_time = time.time()-t0
-            st.session_state.path_count = st.session_state.svg_text.count('<path')
-            st.success(f"Vectorization completed in {st.session_state.vector_time:.2f}s – {st.session_state.path_count} paths (re-run OK)")
+            if mode=="fill":
+                # Approximate loop count by counting 'M ' commands
+                loops = st.session_state.svg_text.count('M ')
+                st.session_state.path_count = loops
+                st.success(f"Fill vectorization completed in {st.session_state.vector_time:.2f}s – loops={loops} (re-run OK)")
+            else:
+                st.session_state.path_count = st.session_state.svg_text.count('<path')
+                st.success(f"Centerline vectorization completed in {st.session_state.vector_time:.2f}s – paths={st.session_state.path_count} (re-run OK)")
     if st.session_state.vector_time:
         st.caption(f"Last run: {st.session_state.vector_time:.2f}s, paths={st.session_state.path_count}")
 

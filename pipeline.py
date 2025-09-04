@@ -46,7 +46,7 @@ MODEL_CANDIDATES = [
     "gemini-2.5-flash-image-preview"
 ]
 PROMPT = (
-    "I need a centerline trace of this, so it can later be easily be converted to an svg. Only black and white may be used with an even-odd loop so svg tracing is easier"  # default AI prompt
+    "I need a centerline trace of this, so it can later be easily be converted to an svg. Only black and white may be used with an even-odd loop so svg tracing is easier. fills may be used if rerpesenting a black or white area from input image."  # default AI prompt
 )
 
 

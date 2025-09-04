@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-Centerline Vectorizer for CNC/Laser
------------------------------------
+Vectorizer for CNC/Laser
+------------------------
 
-Takes a raster image and produces a smooth centerline SVG.
+Modes:
+    - centerline (existing): skeleton-based centerline stroke paths.
+    - fill: extract filled region polygons (black shapes) with even-odd rule for holes.
+
+In fill mode the binary mask is contour traced (outer + hole boundaries) and output as
+filled paths (no stroke) enabling direct engraving / cutting fill workflows.
 
 Dependencies:
-    pip install pillow numpy scikit-image scipy opencv-python
+        pip install pillow numpy scikit-image scipy opencv-python
 """
 
 import math
@@ -15,6 +20,11 @@ import argparse
 import numpy as np
 from PIL import Image, ImageOps
 from skimage.morphology import skeletonize
+from skimage import measure
+try:
+    import cv2  # Optional (preferred for contour hierarchy)
+except Exception:  # pragma: no cover
+    cv2 = None
 from scipy.signal import savgol_filter
 
 # ---------------------------
@@ -33,6 +43,7 @@ CORNER_ANGLE = 65         # preserve corners sharper than this (deg)
 # Optional background color for visualization (set to '#ffffff' for white). None = no rect.
 BACKGROUND_COLOR = None   # Adding a filled rect may create a 'fill' object some CAM tools try to engrave.
                           # Leave None for machining exports; set to color only for on-screen viewing.
+MODE         = "centerline"  # or "fill"
 # ---------------------------
 
 # Utility functions
@@ -100,7 +111,7 @@ def smooth_poly(poly, scale):
 # ---------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Raster centerline vectorizer: PNG -> SVG centerline paths",
+        description="Raster vectorizer: PNG -> SVG (centerline or filled)",
         epilog="Usage: pngtrace.py input.png [output.svg]"
     )
     parser.add_argument("input", nargs='?', default=INPUT_FILE, help="Input raster (PNG, JPG, etc.)")
@@ -115,11 +126,52 @@ def parse_args():
     parser.add_argument("--smooth-win", type=int, default=SMOOTH_WIN, help="Savitzky-Golay window (odd)")
     parser.add_argument("--smooth-order", type=int, default=SMOOTH_ORDER, help="Savitzky-Golay polynomial order")
     parser.add_argument("--thresh-bias", type=float, default=THRESH_BIAS, help="Threshold bias")
+    parser.add_argument("--mode", choices=["centerline","fill"], default=MODE, help="Vectorization mode")
     return parser.parse_args()
+
+def polygon_area(loop):
+    """Signed area (x,y)."""
+    a=0.0
+    for i in range(len(loop)):
+        x1,y1=loop[i]
+        x2,y2=loop[(i+1)%len(loop)]
+        a+=x1*y2 - x2*y1
+    return a/2.0
+
+def simplify_loop(loop, epsilon):
+    """RDP for closed loop; keeps closure."""
+    if len(loop)<3:
+        return loop
+    # duplicate first at end for continuity; RDP expects list -> open path; we treat open then re-close
+    open_path = loop + [loop[0]]
+    simp = rdp(open_path, epsilon)
+    if simp[0]!=simp[-1]:
+        simp[-1]=simp[0]
+    return simp[:-1]
+
+def extract_fill_loops(binary_mask, scale):
+    """Return list of loops (each list of (x,y)) scaled down by 'scale'.
+    Uses OpenCV if available to get hierarchy (outer vs holes) else skimage.measure.find_contours.
+    """
+    loops=[]
+    if cv2 is not None:
+        m = (binary_mask>0).astype(np.uint8)*255
+        contours, hierarchy = cv2.findContours(m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+        for cnt in contours:
+            pts = [(p[0][0]/scale, p[0][1]/scale) for p in cnt]  # (x,y)
+            if len(pts)>=3:
+                loops.append(pts)
+    else:
+        # skimage returns (row,col) contours at level 0.5
+        for c in measure.find_contours((binary_mask>0).astype(float), 0.5):
+            pts=[(p[1]/scale, p[0]/scale) for p in c]
+            if len(pts)>=3:
+                loops.append(pts)
+    return loops
 
 def main():
     global INPUT_FILE, OUTPUT_FILE, STROKE_WIDTH, BACKGROUND_COLOR
-    global UPSCALE, RDP_EPS, CORNER_ANGLE, SMOOTH_WIN, SMOOTH_ORDER, THRESH_BIAS
+    global UPSCALE, RDP_EPS, CORNER_ANGLE, SMOOTH_WIN, SMOOTH_ORDER, THRESH_BIAS, MODE
     if len(sys.argv)>1:
         # Use argparse only if user supplies args (keeps zero-arg backward compatibility speed)
         args = parse_args()
@@ -133,6 +185,7 @@ def main():
         SMOOTH_WIN = args.smooth_win
         SMOOTH_ORDER = args.smooth_order
         THRESH_BIAS = args.thresh_bias
+        MODE = args.mode
     # Load and upscale
     img=Image.open(INPUT_FILE).convert("L")
     img=ImageOps.autocontrast(img)
@@ -143,7 +196,46 @@ def main():
     thr=np.mean(arr)-THRESH_BIAS*np.std(arr)
     binary=(arr<thr).astype(np.uint8)
 
-    # Skeletonize
+    if MODE == "fill":
+        # Extract filled region contours
+        loops = extract_fill_loops(binary, UPSCALE)
+        # Simplify & optionally smooth (reuse smoothing by mapping into synthetic poly order)
+        out_loops=[]
+        for loop in loops:
+            # Optional smoothing: treat x,y arrays
+            if len(loop)>=7:
+                xs=np.array([p[0] for p in loop])
+                ys=np.array([p[1] for p in loop])
+                win=min(SMOOTH_WIN, len(loop) if len(loop)%2==1 else len(loop)-1)
+                win=max(5, win)
+                order=min(SMOOTH_ORDER, win-2)
+                try:
+                    xs=savgol_filter(xs, win, order, mode="wrap")
+                    ys=savgol_filter(ys, win, order, mode="wrap")
+                except Exception:
+                    pass
+                loop=[(xs[i], ys[i]) for i in range(len(xs))]
+            loop=simplify_loop(loop, RDP_EPS)
+            if len(loop)>=3:
+                out_loops.append(loop)
+        # Build a single path with subpaths for even-odd fill
+        path_d=""
+        for lp in out_loops:
+            path_d += f"M {lp[0][0]:.2f},{lp[0][1]:.2f} "
+            for (x,y) in lp[1:]:
+                path_d += f"L {x:.2f},{y:.2f} "
+            path_d += "Z "
+        svg=f'<svg xmlns="http://www.w3.org/2000/svg" width="{img.width}" height="{img.height}" viewBox="0 0 {img.width} {img.height}">\n'
+        if BACKGROUND_COLOR:
+            svg+=f'  <rect x="0" y="0" width="100%" height="100%" fill="{BACKGROUND_COLOR}" stroke="none"/>\n'
+        svg+=f'  <path d="{path_d.strip()}" fill="black" fill-rule="evenodd" stroke="none"/>\n'
+        svg+="</svg>\n"
+        with open(OUTPUT_FILE,"w") as f:
+            f.write(svg)
+        print(f"Saved: {OUTPUT_FILE}  (filled loops={len(out_loops)})")
+        return
+
+    # Skeletonize (centerline mode)
     skel=skeletonize(binary>0)
     H,W=skel.shape
     coords=set(zip(*np.where(skel)))
