@@ -117,7 +117,7 @@ def save_image_bytes(image_bytes: bytes) -> str:
     return tmp_png
 
 
-def run_pipeline(input_image: str, output_svg: str, debug: bool=False, outputs_dir: str = "outputs"):
+def run_pipeline(input_image: str, output_svg: str, debug: bool=False, outputs_dir: str = "outputs", outline_padding: float = 0.0):
     # Prepare run directory
     ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')
     run_dir = Path(outputs_dir) / ts
@@ -147,9 +147,14 @@ def run_pipeline(input_image: str, output_svg: str, debug: bool=False, outputs_d
 
     prev_input = v1.INPUT_FILE
     prev_output = v1.OUTPUT_FILE
+    prev_outline = getattr(v1, 'OUTLINE_PADDING', 0.0)
     try:
         v1.INPUT_FILE = tmp_png
         v1.OUTPUT_FILE = str(final_svg_path)
+        try:
+            v1.OUTLINE_PADDING = float(outline_padding or 0.0)
+        except Exception:
+            pass
         old_argv = sys.argv
         sys.argv = [old_argv[0]]
         try:
@@ -159,6 +164,10 @@ def run_pipeline(input_image: str, output_svg: str, debug: bool=False, outputs_d
     finally:
         v1.INPUT_FILE = prev_input
         v1.OUTPUT_FILE = prev_output
+        try:
+            v1.OUTLINE_PADDING = prev_outline
+        except Exception:
+            pass
     print(f"[PIPELINE] Completed. Run dir: {run_dir}\n[PIPELINE] Final SVG: {final_svg_path}")
     # Debug composite (original + AI + final vector rasterization)
     if debug:
@@ -332,12 +341,13 @@ def parse_args():
     ap.add_argument("output", nargs='?', default="pipeline_output.svg", help="Output SVG file")
     ap.add_argument("--debug", action="store_true", help="Verbose debug output")
     ap.add_argument("--outputs-dir", default="outputs", help="Base directory for per-run output folders")
+    ap.add_argument("--outline-padding", type=float, default=0.0, help="External outline cut padding in output pixels (0 disables)")
     return ap.parse_args()
 
 
 def main():
     a = parse_args()
-    run_pipeline(a.input, a.output, debug=a.debug, outputs_dir=a.outputs_dir)
+    run_pipeline(a.input, a.output, debug=a.debug, outputs_dir=a.outputs_dir, outline_padding=a.outline_padding)
 
 if __name__ == "__main__":
     main()

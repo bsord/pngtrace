@@ -19,8 +19,9 @@ import sys
 import argparse
 import numpy as np
 from PIL import Image, ImageOps
-from skimage.morphology import skeletonize
+from skimage.morphology import skeletonize, binary_dilation, disk
 from skimage import measure
+from scipy import ndimage as ndi
 try:
     import cv2  # Optional (preferred for contour hierarchy)
 except Exception:  # pragma: no cover
@@ -34,7 +35,7 @@ INPUT_FILE   = "input.png"      # default; can be overridden by CLI
 OUTPUT_FILE  = "output_centerline.svg"
 
 UPSCALE      = 4          # scale factor to reduce pixel jaggies
-THRESH_BIAS  = 0.2        # threshold bias; increase if faint lines disappear
+THRESH_BIAS  = 0.8        # threshold bias; increase if faint lines disappear
 SMOOTH_WIN   = 21         # Savitzky-Golay window (odd, adaptive if too short)
 SMOOTH_ORDER = 3          # polynomial order for Savitzky-Golay
 RDP_EPS      = 0.8        # simplification tolerance (px); lower = more detail
@@ -43,7 +44,9 @@ CORNER_ANGLE = 65         # preserve corners sharper than this (deg)
 # Optional background color for visualization (set to '#ffffff' for white). None = no rect.
 BACKGROUND_COLOR = None   # Adding a filled rect may create a 'fill' object some CAM tools try to engrave.
                           # Leave None for machining exports; set to color only for on-screen viewing.
-MODE         = "centerline"  # or "fill"
+MODE         = "fill"  # or "centerline"
+# Optional outline cut padding (in output pixels). 0 disables.
+OUTLINE_PADDING = 0.0
 # ---------------------------
 
 # Utility functions
@@ -127,6 +130,8 @@ def parse_args():
     parser.add_argument("--smooth-order", type=int, default=SMOOTH_ORDER, help="Savitzky-Golay polynomial order")
     parser.add_argument("--thresh-bias", type=float, default=THRESH_BIAS, help="Threshold bias")
     parser.add_argument("--mode", choices=["centerline","fill"], default=MODE, help="Vectorization mode")
+    parser.add_argument("--outline-padding", type=float, default=OUTLINE_PADDING,
+                        help="External outline cut padding in output pixels (0 disables)")
     return parser.parse_args()
 
 def polygon_area(loop):
@@ -169,6 +174,46 @@ def extract_fill_loops(binary_mask, scale):
                 loops.append(pts)
     return loops
 
+def compute_outline_loops(binary_mask, scale, padding_px):
+    """Compute external outline loop(s) around the foreground with padding in output pixels.
+    - binary_mask: upscaled binary (uint8/boolean) where True/1 = foreground
+    - scale: UPSCALE factor to downscale coordinates to output units
+    - padding_px: padding at output scale; converted to upscaled pixel radius
+    Returns list of loops (each list of (x,y)) scaled down by 'scale'.
+    """
+    if padding_px is None or padding_px <= 0:
+        return []
+    # Convert padding from output pixels to upscaled mask pixels
+    rad_up = max(1, int(round(padding_px * scale)))
+    mask_bool = (binary_mask > 0)
+    try:
+        selem = disk(rad_up)
+        dil = binary_dilation(mask_bool, footprint=selem)
+    except Exception:
+        dil = binary_dilation(mask_bool, iterations=rad_up)
+    # Fill holes so outline hugs only the outer perimeter(s)
+    dil_filled = ndi.binary_fill_holes(dil)
+    loops = []
+    if cv2 is not None:
+        m = (dil_filled.astype(np.uint8)) * 255
+        contours, _hier = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        for cnt in contours:
+            pts = [(p[0][0]/scale, p[0][1]/scale) for p in cnt]
+            if len(pts) >= 3:
+                loops.append(pts)
+    else:
+        for c in measure.find_contours(dil_filled.astype(float), 0.5):
+            pts=[(p[1]/scale, p[0]/scale) for p in c]
+            if len(pts)>=3:
+                loops.append(pts)
+    # Light simplification to keep outline smooth but faithful
+    out = []
+    for loop in loops:
+        lp = simplify_loop(loop, max(0.5, RDP_EPS/2))
+        if len(lp) >= 3:
+            out.append(lp)
+    return out
+
 def main():
     global INPUT_FILE, OUTPUT_FILE, STROKE_WIDTH, BACKGROUND_COLOR
     global UPSCALE, RDP_EPS, CORNER_ANGLE, SMOOTH_WIN, SMOOTH_ORDER, THRESH_BIAS, MODE
@@ -186,6 +231,10 @@ def main():
         SMOOTH_ORDER = args.smooth_order
         THRESH_BIAS = args.thresh_bias
         MODE = args.mode
+        try:
+            globals()['OUTLINE_PADDING'] = float(args.outline_padding)
+        except Exception:
+            pass
     # Load and upscale
     img=Image.open(INPUT_FILE).convert("L")
     img=ImageOps.autocontrast(img)
@@ -225,14 +274,44 @@ def main():
             for (x,y) in lp[1:]:
                 path_d += f"L {x:.2f},{y:.2f} "
             path_d += "Z "
-        svg=f'<svg xmlns="http://www.w3.org/2000/svg" width="{img.width}" height="{img.height}" viewBox="0 0 {img.width} {img.height}">\n'
+        # Compute outline and bounds expansion if needed
+        try:
+            outline_loops = compute_outline_loops(binary, UPSCALE, OUTLINE_PADDING)
+        except Exception:
+            outline_loops = []
+        left_exp = top_exp = right_exp = bottom_exp = 0.0
+        if outline_loops:
+            xs = [x for lp in outline_loops for (x,_) in lp]
+            ys = [y for lp in outline_loops for (_,y) in lp]
+            if xs and ys:
+                minx, maxx = min(xs), max(xs)
+                miny, maxy = min(ys), max(ys)
+                left_exp = max(0.0, 0.0 - minx)
+                top_exp = max(0.0, 0.0 - miny)
+                right_exp = max(0.0, maxx - img.width)
+                bottom_exp = max(0.0, maxy - img.height)
+        dx, dy = left_exp, top_exp
+        new_w = img.width + left_exp + right_exp
+        new_h = img.height + top_exp + bottom_exp
+        # Build SVG with optional group translation
+        svg=f'<svg xmlns="http://www.w3.org/2000/svg" width="{int(math.ceil(new_w))}" height="{int(math.ceil(new_h))}" viewBox="0 0 {new_w:.2f} {new_h:.2f}">\n'
         if BACKGROUND_COLOR:
             svg+=f'  <rect x="0" y="0" width="100%" height="100%" fill="{BACKGROUND_COLOR}" stroke="none"/>\n'
-        svg+=f'  <path d="{path_d.strip()}" fill="black" fill-rule="evenodd" stroke="none"/>\n'
+        if dx!=0 or dy!=0:
+            svg+=f'  <g transform="translate({dx:.2f},{dy:.2f})">\n'
+            indent = "    "
+        else:
+            indent = "  "
+        svg+=indent + f'<path d="{path_d.strip()}" fill="black" fill-rule="evenodd" stroke="none"/>\n'
+        for lp in outline_loops:
+            d_o = f"M {lp[0][0]:.2f},{lp[0][1]:.2f} " + " ".join(f"L {x:.2f},{y:.2f}" for (x,y) in lp[1:]) + " Z"
+            svg+=indent + f'<path d="{d_o}" fill="none" stroke="black" stroke-width="{STROKE_WIDTH}" stroke-linejoin="round" stroke-linecap="round" data-cut="outline"/>\n'
+        if dx!=0 or dy!=0:
+            svg+="  </g>\n"
         svg+="</svg>\n"
         with open(OUTPUT_FILE,"w") as f:
             f.write(svg)
-        print(f"Saved: {OUTPUT_FILE}  (filled loops={len(out_loops)})")
+        print(f"Saved: {OUTPUT_FILE}  (filled loops={len(out_loops)}; outline={len(outline_loops)})")
         return
 
     # Skeletonize (centerline mode)
@@ -301,15 +380,43 @@ def main():
             segments.append(d)
 
     # Write SVG
-    svg=f'<svg xmlns="http://www.w3.org/2000/svg" width="{img.width}" height="{img.height}" viewBox="0 0 {img.width} {img.height}">\n'
+    # Optional outline and bounds expansion
+    try:
+        outline_loops = compute_outline_loops(binary, UPSCALE, OUTLINE_PADDING)
+    except Exception:
+        outline_loops = []
+    left_exp = top_exp = right_exp = bottom_exp = 0.0
+    if outline_loops:
+        xs = [x for lp in outline_loops for (x,_) in lp]
+        ys = [y for lp in outline_loops for (_,y) in lp]
+        if xs and ys:
+            minx, maxx = min(xs), max(xs)
+            miny, maxy = min(ys), max(ys)
+            left_exp = max(0.0, 0.0 - minx)
+            top_exp = max(0.0, 0.0 - miny)
+            right_exp = max(0.0, maxx - img.width)
+            bottom_exp = max(0.0, maxy - img.height)
+    dx, dy = left_exp, top_exp
+    new_w = img.width + left_exp + right_exp
+    new_h = img.height + top_exp + bottom_exp
+    svg=f'<svg xmlns="http://www.w3.org/2000/svg" width="{int(math.ceil(new_w))}" height="{int(math.ceil(new_h))}" viewBox="0 0 {new_w:.2f} {new_h:.2f}">\n'
     if BACKGROUND_COLOR:
-        # Non-stroking background rectangle for visibility; data- attr hints to downstream tools to ignore.
         svg+=f'  <rect x="0" y="0" width="100%" height="100%" fill="{BACKGROUND_COLOR}" stroke="none" data-non-machining="true"/>\n'
+    if dx!=0 or dy!=0:
+        svg+=f'  <g transform="translate({dx:.2f},{dy:.2f})">\n'
+        indent = "    "
+    else:
+        indent = "  "
     for d in segments:
-        svg+=f'  <path d="{d}" fill="none" stroke="black" stroke-width="{STROKE_WIDTH}" stroke-linecap="round" stroke-linejoin="round"/>\n'
+        svg+=indent + f'<path d="{d}" fill="none" stroke="black" stroke-width="{STROKE_WIDTH}" stroke-linecap="round" stroke-linejoin="round"/>\n'
+    for lp in outline_loops:
+        d_o = f"M {lp[0][0]:.2f},{lp[0][1]:.2f} " + " ".join(f"L {x:.2f},{y:.2f}" for (x,y) in lp[1:]) + " Z"
+        svg+=indent + f'<path d="{d_o}" fill="none" stroke="black" stroke-width="{STROKE_WIDTH}" stroke-linejoin="round" stroke-linecap="round" data-cut="outline"/>\n'
+    if dx!=0 or dy!=0:
+        svg+="  </g>\n"
     svg+="</svg>\n"
     with open(OUTPUT_FILE,"w") as f: f.write(svg)
-    print(f"Saved: {OUTPUT_FILE}  (paths={len(segments)})")
+    print(f"Saved: {OUTPUT_FILE}  (paths={len(segments)}; outline={len(outline_loops)})")
 
 if __name__=="__main__":
     main()
